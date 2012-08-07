@@ -18,11 +18,11 @@ if HAVE_CAIRO_PNG
 noinst_PROGRAMS += cairosimple cairotwisted cairoshape
 
 cairosimple_LDADD =					\
+	-lm						\
 	../pango/libpango-$(PANGO_API_VERSION).la	\
 	../pango/libpangocairo-$(PANGO_API_VERSION).la	\
 	$(GLIB_LIBS)					\
-	$(CAIRO_LIBS)					\
-	-lm
+	$(CAIRO_LIBS)
 if HAVE_FREETYPE
 cairosimple_LDADD +=					\
 	../pango/libpangoft2-$(PANGO_API_VERSION).la
