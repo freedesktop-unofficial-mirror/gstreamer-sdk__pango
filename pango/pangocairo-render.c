@@ -573,7 +573,6 @@ draw_error_underline (cairo_t *cr,
   int i;
 
   x += (width - width_units * unit_width) / 2;
-  width = width_units * unit_width;
 
   y_top = y;
   y_bottom = y + height;
@@ -1036,7 +1035,7 @@ pango_cairo_show_error_underline (cairo_t *cr,
 }
 
 /**
- * pango_cairo_glyph_string_path
+ * pango_cairo_glyph_string_path:
  * @cr: a Cairo context
  * @font: a #PangoFont from a #PangoCairoFontMap
  * @glyphs: a #PangoGlyphString

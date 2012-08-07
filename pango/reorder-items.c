@@ -31,13 +31,14 @@ static GList *reorder_items_recurse (GList *items, int n_items);
 
 /**
  * pango_reorder_items:
- * @logical_items:  a #GList of #PangoItem in logical order.
+ * @logical_items: (element-type Pango.Item): a #GList of #PangoItem in logical order.
  *
  * From a list of items in logical order and the associated
  * directional levels, produce a list in visual order.
  * The original list is unmodified.
  *
- * Returns: a #GList of #PangoItem structures in visual order.
+ * Returns: (transfer full) (element-type Pango.Item): a #GList
+ *          of #PangoItem structures in visual order.
  *
  * (Please open a bug if you use this function.
  *  It is not a particularly convenient interface, and the code
