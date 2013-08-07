@@ -82,20 +82,25 @@ pango_engine_shape_class_init (PangoEngineShapeClass *class)
 }
 
 void
-_pango_engine_shape_shape (PangoEngineShape *engine,
-			   PangoFont        *font,
-			   const char       *text,
-			   int               length,
+_pango_engine_shape_shape (PangoEngineShape    *engine,
+			   PangoFont           *font,
+			   const char          *item_text,
+			   unsigned int         item_length,
+			   const char          *paragraph_text,
+			   unsigned int         paragraph_len,
 			   const PangoAnalysis *analysis,
-			   PangoGlyphString *glyphs)
+			   PangoGlyphString    *glyphs)
 {
   glyphs->num_glyphs = 0;
 
   PANGO_ENGINE_SHAPE_GET_CLASS (engine)->script_shape (engine,
 						       font,
-						       text, length,
+						       item_text,
+						       item_length,
 						       analysis,
-						       glyphs);
+						       glyphs,
+						       paragraph_text,
+						       paragraph_len);
 }
 
 PangoCoverageLevel
@@ -121,9 +126,11 @@ static void
 fallback_engine_shape (PangoEngineShape *engine G_GNUC_UNUSED,
 		       PangoFont        *font G_GNUC_UNUSED,
 		       const char       *text,
-		       gint              length,
+		       unsigned int      length,
 		       const PangoAnalysis *analysis,
-		       PangoGlyphString *glyphs)
+		       PangoGlyphString *glyphs,
+                       const char       *paragraph_text G_GNUC_UNUSED,
+                       unsigned int      paragraph_length G_GNUC_UNUSED)
 {
   int n_chars;
   const char *p;
@@ -197,9 +204,9 @@ pango_fallback_engine_class_init (PangoFallbackEngineClass *class)
 PangoEngineShape *
 _pango_get_fallback_shaper (void)
 {
-  static PangoEngineShape *fallback_shaper = NULL;
-  if (!fallback_shaper)
-    fallback_shaper = g_object_new (pango_fallback_engine_get_type (), NULL);
+  static PangoEngineShape *fallback_shaper = NULL; /* MT-safe */
+  if (g_once_init_enter ((gsize*)&fallback_shaper))
+    g_once_init_leave((gsize*)&fallback_shaper, (gsize)g_object_new (pango_fallback_engine_get_type (), NULL));
 
   return fallback_shaper;
 }

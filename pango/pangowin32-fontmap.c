@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <glib/gstdio.h>
 
 #include "pango-fontmap.h"
 #include "pango-impl-utils.h"
@@ -75,6 +76,10 @@ static void       pango_win32_font_map_finalize      (GObject                   
 static PangoFont *pango_win32_font_map_load_font     (PangoFontMap                 *fontmap,
 						      PangoContext                 *context,
 						      const PangoFontDescription   *description);
+static PangoFontset *pango_win32_font_map_load_fontset (PangoFontMap               *fontmap,
+						      PangoContext                 *context,
+						      const PangoFontDescription   *desc,
+						      PangoLanguage                *language);
 static void       pango_win32_font_map_list_families (PangoFontMap                 *fontmap,
 						      PangoFontFamily            ***families,
 						      int                          *n_families);
@@ -95,7 +100,7 @@ static PangoWin32Family *pango_win32_get_font_family (PangoWin32FontMap         
 
 static const char *pango_win32_face_get_face_name    (PangoFontFace *face);
 
-static PangoWin32FontMap *default_fontmap = NULL;
+static PangoWin32FontMap *default_fontmap = NULL; /* MT-safe */
 
 G_DEFINE_TYPE (PangoWin32FontMap, _pango_win32_font_map, PANGO_TYPE_FONT_MAP)
 
@@ -299,6 +304,283 @@ synthesize_foreach (gpointer key,
     }
 }
 
+struct PangoAlias
+{
+  char *alias;
+  int n_families;
+  char **families;
+  gboolean visible; /* Do we want/need this? */
+};
+
+static GHashTable *pango_aliases_ht = NULL; /* MT-unsafe */
+
+static guint
+alias_hash (struct PangoAlias *alias)
+{
+  return g_str_hash (alias->alias);
+}
+
+static gboolean
+alias_equal (struct PangoAlias *alias1,
+             struct PangoAlias *alias2)
+{
+  return g_str_equal (alias1->alias,
+                      alias2->alias);
+}
+
+static void
+alias_free (struct PangoAlias *alias)
+{
+  int i;
+  g_free (alias->alias);
+
+  for (i = 0; i < alias->n_families; i++)
+    g_free (alias->families[i]);
+
+  g_free (alias->families);
+
+  g_slice_free (struct PangoAlias, alias);
+}
+
+static void
+handle_alias_line (GString  *line_buffer,
+                   char    **errstring)
+{
+  GString *tmp_buffer1;
+  GString *tmp_buffer2;
+  const char *pos;
+  struct PangoAlias alias_key;
+  struct PangoAlias *alias;
+  gboolean append = FALSE;
+  char **new_families;
+  int n_new;
+  int i;
+
+  tmp_buffer1 = g_string_new (NULL);
+  tmp_buffer2 = g_string_new (NULL);
+
+  pos = line_buffer->str;
+  if (!pango_skip_space (&pos))
+    return;
+
+  if (!pango_scan_string (&pos, tmp_buffer1) ||
+      !pango_skip_space (&pos))
+    {
+      *errstring = g_strdup ("Line is not of the form KEY=VALUE or KEY+=VALUE");
+      goto error;
+    }
+
+  if (*pos == '+')
+    {
+      append = TRUE;
+      pos++;
+    }
+
+  if (*(pos++) != '=')
+    {
+      *errstring = g_strdup ("Line is not of the form KEY=VALUE or KEY+=VALUE");
+      goto error;
+    }
+
+  if (!pango_scan_string (&pos, tmp_buffer2))
+    {
+      *errstring = g_strdup ("Error parsing value string");
+      goto error;
+    }
+  if (pango_skip_space (&pos))
+    {
+      *errstring = g_strdup ("Junk after value string");
+      goto error;
+    }
+
+  alias_key.alias = g_ascii_strdown (tmp_buffer1->str, -1);
+
+  /* Remove any existing values */
+  alias = g_hash_table_lookup (pango_aliases_ht, &alias_key);
+
+  if (!alias)
+    {
+      alias = g_slice_new0 (struct PangoAlias);
+      alias->alias = alias_key.alias;
+
+      g_hash_table_insert (pango_aliases_ht, alias, alias);
+    }
+  else
+    g_free (alias_key.alias);
+
+  new_families = g_strsplit (tmp_buffer2->str, ",", -1);
+
+  n_new = 0;
+  while (new_families[n_new])
+    n_new++;
+
+  if (alias->families && append)
+    {
+      alias->families = g_realloc (alias->families,
+                                   sizeof (char *) *(n_new + alias->n_families));
+      for (i = 0; i < n_new; i++)
+        alias->families[alias->n_families + i] = new_families[i];
+      g_free (new_families);
+      alias->n_families += n_new;
+    }
+  else
+    {
+      for (i = 0; i < alias->n_families; i++)
+        g_free (alias->families[i]);
+      g_free (alias->families);
+      
+      alias->families = new_families;
+      alias->n_families = n_new;
+    }
+
+ error:
+  
+  g_string_free (tmp_buffer1, TRUE);
+  g_string_free (tmp_buffer2, TRUE);
+}
+
+#ifdef HAVE_CAIRO_WIN32
+
+static const char * const builtin_aliases[] = {
+  "courier = \"courier new\"",
+  "\"segoe ui\" = \"segoe ui,meiryo,malgun gothic,microsoft jhenghei,microsoft yahei,gisha,leelawadee,arial unicode ms,browallia new,mingliu,simhei,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+  "tahoma = \"tahoma,arial unicode ms,lucida sans unicode,browallia new,mingliu,simhei,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+  /* It sucks to use the same GulimChe, MS Gothic, Sylfaen, Kartika,
+   * Latha, Mangal and Raavi fonts for all three of sans, serif and
+   * mono, but it isn't like there would be much choice. For most
+   * non-Latin scripts that Windows includes any font at all for, it
+   * has ony one. One solution is to install the free DejaVu fonts
+   * that are popular on Linux. They are listed here first.
+   */
+  "sans = \"dejavu sans,tahoma,arial unicode ms,lucida sans unicode,browallia new,mingliu,simhei,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+  "sans-serif = \"dejavu sans,tahoma,arial unicode ms,lucida sans unicode,browallia new,mingliu,simhei,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+  "serif = \"dejavu serif,georgia,angsana new,mingliu,simsun,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+ "mono = \"dejavu sans mono,courier new,lucida console,courier monothai,mingliu,simsun,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\"",
+  "monospace = \"dejavu sans mono,courier new,lucida console,courier monothai,mingliu,simsun,gulimche,ms gothic,sylfaen,kartika,latha,mangal,raavi\""
+};
+
+static void
+read_builtin_aliases (void)
+{
+
+  GString *line_buffer;
+  char *errstring = NULL;
+  int line;
+
+  line_buffer = g_string_new (NULL);
+
+  for (line = 0; line < G_N_ELEMENTS (builtin_aliases) && errstring == NULL; line++)
+    {
+      g_string_assign (line_buffer, builtin_aliases[line]);
+      handle_alias_line (line_buffer, &errstring);
+    }
+
+  if (errstring)
+    {
+      g_error ("error in built-in aliases:%d: %s\n", line, errstring);
+      g_free (errstring);
+    }
+
+  g_string_free (line_buffer, TRUE);
+}
+#endif
+
+
+static void
+read_alias_file (const char *filename)
+{
+  FILE *file;
+
+  GString *line_buffer;
+  char *errstring = NULL;
+  int line = 0;
+
+  file = g_fopen (filename, "r");
+  if (!file)
+    return;
+
+  line_buffer = g_string_new (NULL);
+
+  while (pango_read_line (file, line_buffer) &&
+         errstring == NULL)
+    {
+      line++;
+      handle_alias_line (line_buffer, &errstring);
+    }
+
+  if (errstring == NULL && ferror (file))
+    errstring = g_strdup (g_strerror(errno));
+
+  if (errstring)
+    {
+      g_warning ("error reading alias file: %s:%d: %s\n", filename, line, errstring);
+      g_free (errstring);
+    }
+
+  g_string_free (line_buffer, TRUE);
+
+  fclose (file);
+}
+
+static void
+load_aliases (void)
+{
+  char *filename;
+  const char *home;
+
+  pango_aliases_ht = g_hash_table_new_full ((GHashFunc)alias_hash,
+                                            (GEqualFunc)alias_equal,
+                                            (GDestroyNotify)alias_free,
+                                            NULL);
+
+#ifdef HAVE_CAIRO_WIN32
+  read_builtin_aliases ();
+#endif
+
+  filename = g_strconcat (pango_get_sysconf_subdirectory (),
+                          G_DIR_SEPARATOR_S "pango.aliases",
+                          NULL);
+  read_alias_file (filename);
+  g_free (filename);
+
+  home = g_get_home_dir ();
+  if (home && *home)
+    {
+      filename = g_strconcat (home,
+                              G_DIR_SEPARATOR_S ".pango.aliases",
+                              NULL);
+      read_alias_file (filename);
+      g_free (filename);
+    }
+}
+
+static void
+lookup_aliases (const char   *fontname,
+                char       ***families,
+                int          *n_families)
+{
+  struct PangoAlias alias_key;
+  struct PangoAlias *alias;
+
+  if (pango_aliases_ht == NULL)
+    load_aliases ();
+
+  alias_key.alias = g_ascii_strdown (fontname, -1);
+  alias = g_hash_table_lookup (pango_aliases_ht, &alias_key);
+  g_free (alias_key.alias);
+
+  if (alias)
+    {
+      *families = alias->families;
+      *n_families = alias->n_families;
+    }
+  else
+    {
+      *families = NULL;
+      *n_families = 0;
+    }
+}
+
 static void
 create_standard_family (PangoWin32FontMap *win32fontmap,
 			const char        *standard_family_name)
@@ -307,7 +589,7 @@ create_standard_family (PangoWin32FontMap *win32fontmap,
   int n_aliases;
   char **aliases;
 
-  pango_lookup_aliases (standard_family_name, &aliases, &n_aliases);
+  lookup_aliases (standard_family_name, &aliases, &n_aliases);
   for (i = 0; i < n_aliases; i++)
     {
       PangoWin32Family *existing_family = g_hash_table_lookup (win32fontmap->families, aliases[i]);
@@ -387,6 +669,42 @@ _pango_win32_font_map_init (PangoWin32FontMap *win32fontmap)
 }
 
 static void
+pango_win32_font_map_fontset_add_fonts (PangoFontMap          *fontmap,
+				  PangoContext          *context,
+				  PangoFontsetSimple *fonts,
+				  PangoFontDescription  *desc,
+				  const char            *family)
+{
+  /* Mostly use the "old" pango_font_map_fontset_add_fonts() */
+  /* on Windows so that we can go through the .aliases file */
+  /* to load the appropriate fontset for various texts */
+  PangoFont *font, *result;
+  char **aliases;
+  int n_aliases;
+  int j;
+
+  lookup_aliases (family, &aliases, &n_aliases);
+
+  if (n_aliases)
+  {
+    for (j = 0; j < n_aliases; j++)
+    {
+      pango_font_description_set_family_static (desc, aliases[j]);
+      font = pango_win32_font_map_load_font (fontmap, context, desc);
+      if (font)
+        pango_fontset_simple_append (fonts, font);
+    }
+  }
+  else
+  {
+    pango_font_description_set_family_static (desc, family);
+    font = pango_win32_font_map_load_font (fontmap, context, desc);
+    if (font)
+      pango_fontset_simple_append (fonts, font);
+  }
+}
+
+static void
 _pango_win32_font_map_class_init (PangoWin32FontMapClass *class)
 {
   GObjectClass *object_class = G_OBJECT_CLASS (class);
@@ -396,6 +714,8 @@ _pango_win32_font_map_class_init (PangoWin32FontMapClass *class)
   class->find_font = pango_win32_font_map_real_find_font;
   object_class->finalize = pango_win32_font_map_finalize;
   fontmap_class->load_font = pango_win32_font_map_load_font;
+  /* we now need a load_fontset implementation for the Win32 backend */
+  fontmap_class->load_fontset = pango_win32_font_map_load_fontset;
   fontmap_class->list_families = pango_win32_font_map_list_families;
   fontmap_class->shape_engine_type = PANGO_RENDER_TYPE_WIN32;
 
@@ -417,13 +737,13 @@ _pango_win32_font_map_class_init (PangoWin32FontMapClass *class)
 PangoFontMap *
 pango_win32_font_map_for_display (void)
 {
+#if !GLIB_CHECK_VERSION (2, 35, 3)
   /* Make sure that the type system is initialized */
   g_type_init ();
+#endif
 
-  if (default_fontmap != NULL)
-    return PANGO_FONT_MAP (default_fontmap);
-
-  default_fontmap = g_object_new (PANGO_TYPE_WIN32_FONT_MAP, NULL);
+  if (g_once_init_enter ((gsize*)&default_fontmap))
+    g_once_init_leave((gsize*)&default_fontmap, (gsize)g_object_new (PANGO_TYPE_WIN32_FONT_MAP, NULL));
 
   return PANGO_FONT_MAP (default_fontmap);
 }
@@ -1121,10 +1441,8 @@ pango_win32_font_description_from_logfontw (const LOGFONTW *lfp)
 }
 
 static char *
-charset_name (int charset)
+charset_name (int charset, char* num)
 {
-  static char num[10];
-
   switch (charset)
     {
 #define CASE(x) case x##_CHARSET: return #x
@@ -1155,10 +1473,8 @@ charset_name (int charset)
 }
 
 static char *
-ff_name (int ff)
+ff_name (int ff, char* num)
 {
-  static char num[10];
-
   switch (ff)
     {
 #define CASE(x) case FF_##x: return #x
@@ -1186,13 +1502,16 @@ pango_win32_insert_font (PangoWin32FontMap *win32fontmap,
   PangoWin32Face *win32face;
   gint i;
 
+  char tmp_for_charset_name[10];
+  char tmp_for_ff_name[10];
+
   PING (("face=%S,charset=%s,it=%s,wt=%ld,ht=%ld,ff=%s%s",
 	 lfp->lfFaceName,
-	 charset_name (lfp->lfCharSet),
+	 charset_name (lfp->lfCharSet, tmp_for_charset_name),
 	 lfp->lfItalic ? "yes" : "no",
 	 lfp->lfWeight,
 	 lfp->lfHeight,
-	 ff_name (lfp->lfPitchAndFamily & 0xF0),
+	 ff_name (lfp->lfPitchAndFamily & 0xF0, tmp_for_ff_name),
 	 is_synthetic ? " synthetic" : ""));
 
   /* Ignore Symbol fonts (which don't have any Unicode mapping
@@ -1408,4 +1727,119 @@ pango_win32_fontmap_cache_clear (PangoWin32FontMap *win32fontmap)
   g_list_foreach (win32fontmap->freed_fonts->head, (GFunc)g_object_unref, NULL);
   g_queue_free (win32fontmap->freed_fonts);
   win32fontmap->freed_fonts = g_queue_new ();
+}
+
+static PangoFontset *
+pango_win32_font_map_load_fontset (PangoFontMap                 *fontmap,
+				PangoContext                 *context,
+				const PangoFontDescription   *desc,
+				PangoLanguage                *language)
+{
+  /* This "adds" a load_fontset() for the Win32 backend */
+  /* which is needed to make sure we use an appropriate */
+  /* font for various texts when we are on Windows */
+  /* (Copied directly from pango-fontmap.c) */
+  PangoFontDescription *tmp_desc = pango_font_description_copy_static (desc);
+  const char *family;
+  char **families;
+  int i;
+  PangoFontsetSimple *fonts;
+  static GHashTable *warned_fonts = NULL; /* MT-safe */
+  G_LOCK_DEFINE_STATIC (warned_fonts);
+
+  g_return_val_if_fail (fontmap != NULL, NULL);
+
+  family = pango_font_description_get_family (desc);
+  families = g_strsplit (family ? family : "", ",", -1);
+
+  fonts = pango_fontset_simple_new (language);
+
+  for (i = 0; families[i]; i++)
+    pango_win32_font_map_fontset_add_fonts (fontmap,
+				      context,
+				      fonts,
+				      tmp_desc,
+				      families[i]);
+
+  g_strfreev (families);
+
+  /* The font description was completely unloadable, try with
+   * family == "Sans"
+   */
+  if (pango_fontset_simple_size (fonts) == 0)
+    {
+      char *ctmp1, *ctmp2;
+
+      pango_font_description_set_family_static (tmp_desc,
+						pango_font_description_get_family (desc));
+
+      ctmp1 = pango_font_description_to_string (desc);
+      pango_font_description_set_family_static (tmp_desc, "Sans");
+
+      G_LOCK (warned_fonts);
+      if (!warned_fonts || !g_hash_table_lookup (warned_fonts, ctmp1))
+	{
+	  if (!warned_fonts)
+	    warned_fonts = g_hash_table_new (g_str_hash, g_str_equal);
+
+	  g_hash_table_insert (warned_fonts, g_strdup (ctmp1), GINT_TO_POINTER (1));
+
+	  ctmp2 = pango_font_description_to_string (tmp_desc);
+	  g_warning ("couldn't load font \"%s\", falling back to \"%s\", "
+		     "expect ugly output.", ctmp1, ctmp2);
+	  g_free (ctmp2);
+	}
+      G_UNLOCK (warned_fonts);
+      g_free (ctmp1);
+
+      pango_win32_font_map_fontset_add_fonts (fontmap,
+					context,
+					fonts,
+					tmp_desc,
+					"Sans");
+    }
+
+  /* We couldn't try with Sans and the specified style. Try Sans Normal
+   */
+  if (pango_fontset_simple_size (fonts) == 0)
+    {
+      char *ctmp1, *ctmp2;
+
+      pango_font_description_set_family_static (tmp_desc, "Sans");
+      ctmp1 = pango_font_description_to_string (tmp_desc);
+      pango_font_description_set_style (tmp_desc, PANGO_STYLE_NORMAL);
+      pango_font_description_set_weight (tmp_desc, PANGO_WEIGHT_NORMAL);
+      pango_font_description_set_variant (tmp_desc, PANGO_VARIANT_NORMAL);
+      pango_font_description_set_stretch (tmp_desc, PANGO_STRETCH_NORMAL);
+
+      G_LOCK (warned_fonts);
+      if (!warned_fonts || !g_hash_table_lookup (warned_fonts, ctmp1))
+	{
+	  g_hash_table_insert (warned_fonts, g_strdup (ctmp1), GINT_TO_POINTER (1));
+
+	  ctmp2 = pango_font_description_to_string (tmp_desc);
+
+	  g_warning ("couldn't load font \"%s\", falling back to \"%s\", "
+		     "expect ugly output.", ctmp1, ctmp2);
+	  g_free (ctmp2);
+	}
+      G_UNLOCK (warned_fonts);
+      g_free (ctmp1);
+
+      pango_win32_font_map_fontset_add_fonts (fontmap,
+					context,
+					fonts,
+					tmp_desc,
+					"Sans");
+    }
+
+  pango_font_description_free (tmp_desc);
+
+  /* Everything failed, we are screwed, there is no way to continue,
+   * but lets just not crash here.
+   */
+  if (pango_fontset_simple_size (fonts) == 0)
+      g_warning ("All font fallbacks failed!!!!");
+
+  return PANGO_FONTSET (fonts);
 }

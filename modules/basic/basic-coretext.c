@@ -139,6 +139,12 @@ run_iterator_get_glyph_count (struct RunIterator *iter)
   return accumulator;
 }
 
+/* These functions are commented out to silence the compiler, but
+ * kept around because they might be of use when fixing the more
+ * intricate issues noted in the comment in the function
+ * basic_engine_shape() below.
+ */
+#if 0
 static gboolean
 run_iterator_is_rtl (struct RunIterator *iter)
 {
@@ -155,6 +161,7 @@ run_iterator_run_is_non_monotonic (struct RunIterator *iter)
 
   return run_status & kCTRunStatusNonMonotonic;
 }
+#endif
 
 static gunichar
 run_iterator_get_character (struct RunIterator *iter)
@@ -174,7 +181,7 @@ run_iterator_get_index (struct RunIterator *iter)
   return iter->current_indices[iter->ct_i];
 }
 
-static void
+static gboolean
 run_iterator_create (struct RunIterator *iter,
                      const char         *text,
                      const gint          length,
@@ -213,6 +220,12 @@ run_iterator_create (struct RunIterator *iter,
                                           kCFStringEncodingUTF8);
   g_free (copy);
 
+  if (!iter->cstr)
+    /* Creating a CFString can fail if the input string does not
+     * adhere to the specified encoding (i.e. it contains invalid UTF8).
+     */
+    return FALSE;
+
   attstr = CFAttributedStringCreate (kCFAllocatorDefault,
                                      iter->cstr,
                                      attributes);
@@ -234,6 +247,8 @@ run_iterator_create (struct RunIterator *iter,
     run_iterator_set_current_run (iter, 0);
   else
     iter->total_ct_i = -1;
+
+  return TRUE;
 }
 
 static void
@@ -313,7 +328,8 @@ create_core_text_glyph_list (const char *text,
   GSList *glyph_list = NULL;
   struct RunIterator riter;
 
-  run_iterator_create (&riter, text, length, ctfont);
+  if (!run_iterator_create (&riter, text, length, ctfont))
+    return NULL;
 
   while (!run_iterator_at_end (&riter))
     {
@@ -388,6 +404,8 @@ basic_engine_shape (PangoEngineShape    *engine,
 
   glyph_list = create_core_text_glyph_list (text, length,
                                             pango_core_text_font_get_ctfont (cfont));
+  if (!glyph_list)
+    return;
 
   /* Translate the glyph list to a PangoGlyphString */
   n_chars = g_utf8_strlen (text, length);

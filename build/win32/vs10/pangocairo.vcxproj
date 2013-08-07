@@ -166,10 +166,10 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\pango\pangocairo-win32font.c" />
     <ClCompile Include="..\..\..\pango\pangocairo-win32fontmap.c" />
-   <ClCompile Include="..\..\..\pango\pangocairo-context.c" />
-   <ClCompile Include="..\..\..\pango\pangocairo-font.c" />
-   <ClCompile Include="..\..\..\pango\pangocairo-fontmap.c" />
-   <ClCompile Include="..\..\..\pango\pangocairo-render.c" />
+ <ClCompile Include="..\..\..\pango\pangocairo-context.c" />
+ <ClCompile Include="..\..\..\pango\pangocairo-font.c" />
+ <ClCompile Include="..\..\..\pango\pangocairo-fontmap.c" />
+ <ClCompile Include="..\..\..\pango\pangocairo-render.c" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="pango.vcxproj">

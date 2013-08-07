@@ -307,10 +307,10 @@
    </File>
    <File RelativePath="..\..\..\pango\pangocairo-win32font.c" />
    <File RelativePath="..\..\..\pango\pangocairo-win32fontmap.c" />
-   <File RelativePath="..\..\..\pango\pangocairo-context.c" />
-   <File RelativePath="..\..\..\pango\pangocairo-font.c" />
-   <File RelativePath="..\..\..\pango\pangocairo-fontmap.c" />
-   <File RelativePath="..\..\..\pango\pangocairo-render.c" />
+ <File RelativePath="..\..\..\pango\pangocairo-context.c" />
+ <File RelativePath="..\..\..\pango\pangocairo-font.c" />
+ <File RelativePath="..\..\..\pango\pangocairo-fontmap.c" />
+ <File RelativePath="..\..\..\pango\pangocairo-render.c" />
   </Filter>
  </Files>
 </VisualStudioProject>

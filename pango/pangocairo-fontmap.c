@@ -25,12 +25,8 @@
 #include "pangocairo-private.h"
 #include "pango-impl-utils.h"
 
-#if defined (HAVE_CAIRO_ATSUI)
-#  if defined (HAVE_CORE_TEXT)
-#    include "pangocairo-coretext.h"
-#  else
-#    include "pangocairo-atsui.h"
-#  endif
+#if defined (HAVE_CORE_TEXT) && defined (HAVE_CAIRO_QUARTZ)
+#  include "pangocairo-coretext.h"
 #endif
 #if defined (HAVE_CAIRO_WIN32)
 #  include "pangocairo-win32.h"
@@ -70,15 +66,8 @@ pango_cairo_font_map_default_init (PangoCairoFontMapIface *iface)
 PangoFontMap *
 pango_cairo_font_map_new (void)
 {
-  /* Make sure that the type system is initialized */
-  g_type_init ();
-
-#if defined(HAVE_CAIRO_ATSUI)
-#if defined(HAVE_CORE_TEXT)
+#if defined(HAVE_CORE_TEXT) && defined (HAVE_CAIRO_QUARTZ)
   return g_object_new (PANGO_TYPE_CAIRO_CORE_TEXT_FONT_MAP, NULL);
-#else
-  return g_object_new (PANGO_TYPE_CAIRO_ATSUI_FONT_MAP, NULL);
-#endif
 #elif defined(HAVE_CAIRO_WIN32)
   return g_object_new (PANGO_TYPE_CAIRO_WIN32_FONT_MAP, NULL);
 #elif defined(HAVE_CAIRO_FREETYPE)
@@ -110,18 +99,11 @@ pango_cairo_font_map_new (void)
 PangoFontMap *
 pango_cairo_font_map_new_for_font_type (cairo_font_type_t fonttype)
 {
-  /* Make sure that the type system is initialized */
-  g_type_init ();
-
   switch ((int) fonttype)
   {
-#if defined(HAVE_CAIRO_ATSUI)
+#if defined(HAVE_CORE_TEXT) && defined (HAVE_CAIRO_QUARTZ)
     case CAIRO_FONT_TYPE_QUARTZ:
-#if defined(HAVE_CORE_TEXT)
       return g_object_new (PANGO_TYPE_CAIRO_CORE_TEXT_FONT_MAP, NULL);
-#else
-      return g_object_new (PANGO_TYPE_CAIRO_ATSUI_FONT_MAP, NULL);
-#endif
 #endif
 #if defined(HAVE_CAIRO_WIN32)
     case CAIRO_FONT_TYPE_WIN32:
@@ -136,7 +118,7 @@ pango_cairo_font_map_new_for_font_type (cairo_font_type_t fonttype)
   }
 }
 
-static PangoFontMap *default_font_map = NULL;
+static GPrivate default_font_map = G_PRIVATE_INIT (g_object_unref); /* MT-safe */
 
 /**
  * pango_cairo_font_map_get_default:
@@ -153,18 +135,27 @@ static PangoFontMap *default_font_map = NULL;
  * change the Cairo font backend that the default fontmap
  * uses for example.
  *
- * Return value: (transfer none): the default Cairo fontmap
- *  for Pango. This object is owned by Pango and must not be freed.
+ * Note that since Pango 1.32.6, the default fontmap is per-thread.
+ * Each thread gets its own default fontmap.  In this way,
+ * PangoCairo can be used safely from multiple threads.
+ *
+ * Return value: (transfer none): the default PangoCairo fontmap
+ *  for the current thread. This object is owned by Pango and must not be freed.
  *
  * Since: 1.10
  **/
 PangoFontMap *
 pango_cairo_font_map_get_default (void)
 {
-  if (G_UNLIKELY (!default_font_map))
-    default_font_map = pango_cairo_font_map_new ();
+  PangoFontMap *fontmap = g_private_get (&default_font_map);
 
-  return default_font_map;
+  if (G_UNLIKELY (!fontmap))
+    {
+      fontmap = pango_cairo_font_map_new ();
+      g_private_replace (&default_font_map, fontmap);
+    }
+
+  return fontmap;
 }
 
 /**
@@ -177,6 +168,12 @@ pango_cairo_font_map_get_default (void)
  * default fontmap uses for example.  The old default font map
  * is unreffed and the new font map referenced.
  *
+ * Note that since Pango 1.32.6, the default fontmap is per-thread.
+ * This function only changes the default fontmap for
+ * the current thread.   Default fontmaps of exisiting threads
+ * are not changed.  Default fontmaps of any new threads will
+ * still be created using pango_cairo_font_map_new().
+ *
  * A value of %NULL for @fontmap will cause the current default
  * font map to be released and a new default font
  * map to be created on demand, using pango_cairo_font_map_new().
@@ -188,15 +185,10 @@ pango_cairo_font_map_set_default (PangoCairoFontMap *fontmap)
 {
   g_return_if_fail (fontmap == NULL || PANGO_IS_CAIRO_FONT_MAP (fontmap));
 
-  if ((PangoFontMap *) fontmap == default_font_map)
-    return;
-
-  if (default_font_map)
-    g_object_unref (default_font_map);
-
   if (fontmap)
     g_object_ref (fontmap);
-  default_font_map = (PangoFontMap *) fontmap;
+
+  g_private_replace (&default_font_map, fontmap);
 }
 
 /**

@@ -111,8 +111,8 @@ typedef struct
     PangoWeight weight;
 } PangoCTWeight;
 
-static const float ct_weight_min = -1.00f;
-static const float ct_weight_max = 1.00f;
+const float ct_weight_min = -1.00f;
+const float ct_weight_max = 1.00f;
 
 static const PangoCTWeight ct_weight_limits[] = {
     { -0.70, PANGO_WEIGHT_THIN},
@@ -780,7 +780,7 @@ get_context_matrix (PangoContext *context,
 		    PangoMatrix *matrix)
 {
   const PangoMatrix *set_matrix;
-  static const PangoMatrix identity = PANGO_MATRIX_INIT;
+  const PangoMatrix identity = PANGO_MATRIX_INIT;
 
   if (context)
     set_matrix = pango_context_get_matrix (context);
@@ -1191,6 +1191,14 @@ get_first_font (PangoFontset *fontset G_GNUC_UNUSED,
   return TRUE;
 }
 
+static guint
+pango_core_text_font_map_get_serial (PangoFontMap *fontmap)
+{
+  PangoCoreTextFontMap *ctfontmap = PANGO_CORE_TEXT_FONT_MAP (fontmap);
+
+  return ctfontmap->serial;
+}
+
 static PangoFont *
 pango_core_text_font_map_load_font (PangoFontMap               *fontmap,
                                     PangoContext               *context,
@@ -1275,7 +1283,7 @@ pango_core_text_font_map_load_fontset (PangoFontMap               *fontmap,
   PangoCoreTextFontset *fontset;
   PangoCoreTextFontsetKey key;
   PangoCoreTextFontMap *ctfontmap = PANGO_CORE_TEXT_FONT_MAP (fontmap);
-  static gboolean warned_full_fallback = FALSE;
+  static gboolean warned_full_fallback = FALSE; /* MT-safe */
 
   pango_core_text_fontset_key_init (&key, ctfontmap,
                                     context, desc, language);
@@ -1284,13 +1292,11 @@ pango_core_text_font_map_load_fontset (PangoFontMap               *fontmap,
 
   if (G_UNLIKELY (!fontset))
     {
+      gboolean insert_in_hash = TRUE;
+
       fontset = pango_core_text_fontset_new (&key, desc);
 
-      if (G_LIKELY (fontset))
-        g_hash_table_insert (ctfontmap->fontset_hash,
-                             pango_core_text_fontset_get_key (fontset),
-                             fontset);
-      else
+      if (G_UNLIKELY (!fontset))
         {
           /* If no font(set) could be loaded, we fallback to "Sans",
            * which should always work on Mac. We try to adhere to the
@@ -1308,7 +1314,9 @@ pango_core_text_font_map_load_fontset (PangoFontMap               *fontmap,
                                             language);
 
           fontset = g_hash_table_lookup (ctfontmap->fontset_hash, &key);
-          if (G_UNLIKELY (!fontset))
+          if (G_LIKELY (fontset))
+            insert_in_hash = FALSE;
+          else
             fontset = pango_core_text_fontset_new (&key, tmp_desc);
 
           if (G_UNLIKELY (!fontset))
@@ -1335,7 +1343,9 @@ pango_core_text_font_map_load_fontset (PangoFontMap               *fontmap,
                 }
 
               fontset = g_hash_table_lookup (ctfontmap->fontset_hash, &key);
-              if (G_UNLIKELY (!fontset))
+              if (G_LIKELY (fontset))
+                insert_in_hash = FALSE;
+              else
                 fontset = pango_core_text_fontset_new (&key, tmp_desc);
 
               if (G_UNLIKELY (!fontset))
@@ -1346,11 +1356,12 @@ pango_core_text_font_map_load_fontset (PangoFontMap               *fontmap,
                   g_error ("Could not load fallback font, bailing out.");
                 }
             }
-
-          g_hash_table_insert (ctfontmap->fontset_hash,
-                               pango_core_text_fontset_get_key (fontset),
-                               fontset);
         }
+
+      if (insert_in_hash)
+        g_hash_table_insert (ctfontmap->fontset_hash,
+                             pango_core_text_fontset_get_key (fontset),
+                             fontset);
     }
 
   /* Cannot use pango_core_text_fontset_key_free() here */
@@ -1367,6 +1378,7 @@ pango_core_text_font_map_init (PangoCoreTextFontMap *ctfontmap)
   CFArrayRef ctfaces;
   CFIndex i, count;
 
+  ctfontmap->serial = 1;
   ctfontmap->families = g_hash_table_new_full (g_str_hash, g_str_equal,
                                                g_free, g_object_unref);
 
@@ -1458,6 +1470,7 @@ pango_core_text_font_map_class_init (PangoCoreTextFontMapClass *class)
   fontmap_class->list_families = pango_core_text_font_map_list_families;
   fontmap_class->load_fontset = pango_core_text_font_map_load_fontset;
   fontmap_class->shape_engine_type = PANGO_RENDER_TYPE_CORE_TEXT;
+  fontmap_class->get_serial = pango_core_text_font_map_get_serial;
 }
 
 /*
@@ -1487,10 +1500,16 @@ struct _PangoCoreTextFontset
   GPtrArray *coverages;
 };
 
-typedef PangoFontsetClass PangoCoreTextFontsetClass;
+struct _PangoCoreTextFontsetClass
+{
+  PangoFontsetClass parent_instance;
+};
 
-static PangoFontsetClass *core_text_fontset_parent_class;
+typedef struct _PangoCoreTextFontsetClass PangoCoreTextFontsetClass;
 
+G_DEFINE_TYPE (PangoCoreTextFontset,
+               pango_core_text_fontset,
+               PANGO_TYPE_FONTSET);
 
 /* This symbol does exist in the CoreText library shipped with Snow
  * Leopard and Lion, however, it is not found in the public header files.
@@ -1616,8 +1635,6 @@ pango_core_text_fontset_class_init (PangoCoreTextFontsetClass *klass)
   GObjectClass *object_class = G_OBJECT_CLASS (klass);
   PangoFontsetClass *fontset_class = PANGO_FONTSET_CLASS (klass);
 
-  core_text_fontset_parent_class = g_type_class_peek_parent (klass);
-
   object_class->finalize = pango_core_text_fontset_finalize;
 
   fontset_class->get_font = pango_core_text_fontset_get_font;
@@ -1663,7 +1680,7 @@ pango_core_text_fontset_finalize (GObject *object)
   if (ctfontset->key)
     pango_core_text_fontset_key_free (ctfontset->key);
 
-  G_OBJECT_CLASS (core_text_fontset_parent_class)->finalize (object);
+  G_OBJECT_CLASS (pango_core_text_fontset_parent_class)->finalize (object);
 }
 
 static PangoCoreTextFontsetKey *
@@ -1745,6 +1762,3 @@ pango_core_text_fontset_foreach (PangoFontset *fontset,
     }
 }
 
-G_DEFINE_TYPE (PangoCoreTextFontset,
-               pango_core_text_fontset,
-               PANGO_TYPE_FONTSET);

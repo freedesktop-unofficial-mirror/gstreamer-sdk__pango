@@ -209,6 +209,28 @@ set font size.
 @Returns: 
 
 
+<!-- ##### FUNCTION pango_markup_parser_new ##### -->
+<para>
+
+</para>
+
+@accel_marker: 
+@Returns: 
+
+
+<!-- ##### FUNCTION pango_markup_parser_finish ##### -->
+<para>
+
+</para>
+
+@context: 
+@attr_list: 
+@text: 
+@accel_char: 
+@error: 
+@Returns: 
+
+
 <!-- ##### FUNCTION pango_attr_type_register ##### -->
 <para>
 
@@ -465,8 +487,10 @@ A copy function passed to attribute new functions that take
 user data.
 </para>
 
-@data: the user data
+@user_data: 
 @Returns: a new copy of @data.
+<!-- # Unused Parameters # -->
+@data: the user data
 
 
 <!-- ##### FUNCTION pango_attr_scale_new ##### -->
@@ -736,8 +760,10 @@ to filter out a subset of attributes for a list.
 </para>
 
 @attribute: a #PangoAttribute
-@data: callback data passed to pango_attr_list_filter()
+@user_data: 
 @Returns: %TRUE if the attribute should be filtered out
+<!-- # Unused Parameters # -->
+@data: callback data passed to pango_attr_list_filter()
 
 
 <!-- ##### FUNCTION pango_attr_list_get_iterator ##### -->

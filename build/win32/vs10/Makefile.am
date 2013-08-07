@@ -1,6 +1,7 @@
 EXTRA_DIST = \
 	pango.sln \
 	pango_fc.sln \
+	pango.propsin \
 	pango.props \
 	pango.vcxproj \
 	pango.vcxproj.filters \
@@ -22,3 +23,11 @@ EXTRA_DIST = \
 	pangocairo_fc.vcxproj.filtersin \
 	install.vcxproj \
 	README.txt
+
+pango.props: $(top_srcdir)/build/win32/vs10/pango.propsin pango.vs10.headers
+	$(CPP) -P - <$(top_srcdir)/build/win32/vs10/pango.propsin >$@
+	rm pango.vs10.headers
+
+DISTCLEANFILES = pango.props
+
+-include $(top_srcdir)/git.mk

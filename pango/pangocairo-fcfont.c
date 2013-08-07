@@ -185,10 +185,10 @@ get_font_size (const FcPattern *pattern)
 static gpointer
 get_gravity_class (void)
 {
-  static GEnumClass *class = NULL;
+  static GEnumClass *class = NULL; /* MT-safe */
 
-  if (G_UNLIKELY (!class))
-    class = g_type_class_ref (PANGO_TYPE_GRAVITY);
+  if (g_once_init_enter ((gsize*)&class))
+    g_once_init_leave((gsize*)&class, (gsize)g_type_class_ref (PANGO_TYPE_GRAVITY));
 
   return class;
 }

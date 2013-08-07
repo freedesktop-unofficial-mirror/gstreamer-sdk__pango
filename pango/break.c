@@ -30,10 +30,6 @@
 #define PARAGRAPH_SEPARATOR 0x2029
 #define PARAGRAPH_SEPARATOR_STRING "\xE2\x80\xA9"
 
-#if (!GLIB_CHECK_VERSION (2,29,15))
-#define G_UNICODE_SPACING_MARK G_UNICODE_COMBINING_MARK
-#endif
-
 /* See http://www.unicode.org/unicode/reports/tr14/ if you hope
  * to understand the line breaking code.
  */
@@ -660,7 +656,7 @@ pango_default_break (const gchar   *text,
 	switch ((int) type)
 	  {
 	  case G_UNICODE_FORMAT:
-	    if (wc == 0x200C && wc == 0x200D)
+	    if (wc == 0x200C || wc == 0x200D)
 	      {
 		GB_type = GB_Extend; /* U+200C and U+200D are Other_Grapheme_Extend */
 		break;
@@ -669,21 +665,22 @@ pango_default_break (const gchar   *text,
 	  case G_UNICODE_CONTROL:
 	  case G_UNICODE_LINE_SEPARATOR:
 	  case G_UNICODE_PARAGRAPH_SEPARATOR:
+	  case G_UNICODE_SURROGATE:
 	    GB_type = GB_ControlCRLF;
 	    break;
+
+	  case G_UNICODE_UNASSIGNED:
+	    /* Unassigned default ignorables */
+	    if ((wc >= 0xFFF0 && wc <= 0xFFF8) ||
+		(wc >= 0xE0000 && wc <= 0xE0FFF))
+	      {
+		GB_type = GB_ControlCRLF;
+		break;
+	      }
 
 	  case G_UNICODE_OTHER_LETTER:
 	    if (makes_hangul_syllable)
 	      GB_type = GB_InHangulSyllable;
-	    else if ((wc & 0x0E00) == 0x0E00)
-	      {
-	        /* Thai and Lao stuff hardcoded in UAX#29 */
-		if ((wc >= 0x0E40 && wc <= 0x0E44) || (wc >= 0x0EC0 && wc <= 0x0EC4))
-		  GB_type = GB_Prepend; /* Prepend */
-		else if (wc == 0x0E30 || wc == 0x0E32 || wc == 0x0E33 || wc == 0x0E45 ||
-			 wc == 0x0EB0 || wc == 0x0EB2 || wc == 0x0EB3)
-		  GB_type = GB_Extend; /* Exceptions in the Extend definition */
-	      }
 	    break;
 
 	  case G_UNICODE_MODIFIER_LETTER:
@@ -765,7 +762,7 @@ pango_default_break (const gchar   *text,
 		case 0xFF:
 		  if (wc == 0xFF70)
 		    WB_type = WB_Katakana; /* Katakana exceptions */
-		  else if (wc >= 0xFF9E || wc <= 0xFF9F)
+		  else if (wc >= 0xFF9E && wc <= 0xFF9F)
 		    WB_type = WB_ExtendFormat; /* Other_Grapheme_Extend */
 		  break;
 		case 0x05:
@@ -999,7 +996,8 @@ pango_default_break (const gchar   *text,
 	      break;
 
 	    case G_UNICODE_BREAK_SURROGATE:
-	      g_assert_not_reached ();
+	      /* Undefined according to UTR#14, but ALLOWED in test data. */
+	      break_op = BREAK_ALLOWED;
 	      break;
 
 	    default:
@@ -1035,7 +1033,8 @@ pango_default_break (const gchar   *text,
 		  break;
 
 		case G_UNICODE_BREAK_SURROGATE:
-		  g_assert_not_reached ();
+		  /* Undefined according to UTR#14, but ALLOWED in test data. */
+		  break_op = BREAK_ALLOWED;
 		  break;
 
 		/* Hangul additions are from Unicode 4.1 UAX#14 */
@@ -1683,7 +1682,8 @@ tailor_break (const gchar   *text,
  * @text:      the text to process
  * @length:    length of @text in bytes (may be -1 if @text is nul-terminated)
  * @analysis:  #PangoAnalysis structure from pango_itemize()
- * @attrs:     an array to store character information in
+ * @attrs:     (array length=attrs_len): an array to store character
+ *             information in
  * @attrs_len: size of the array passed as @attrs
  *
  * Determines possible line, word, and character breaks
@@ -1708,8 +1708,10 @@ pango_break (const gchar   *text,
  * pango_find_paragraph_boundary:
  * @text: UTF-8 text
  * @length: length of @text in bytes, or -1 if nul-terminated
- * @paragraph_delimiter_index: return location for index of delimiter
- * @next_paragraph_start: return location for start of next paragraph
+ * @paragraph_delimiter_index: (out): return location for index of
+ *   delimiter
+ * @next_paragraph_start: (out): return location for start of next
+ *   paragraph
  *
  * Locates a paragraph boundary in @text. A boundary is caused by
  * delimiter characters, such as a newline, carriage return, carriage
@@ -1843,7 +1845,8 @@ tailor_segment (const char      *range_start,
  * @length: length in bytes of @text
  * @level: embedding level, or -1 if unknown
  * @language: language tag
- * @log_attrs: array with one #PangoLogAttr per character in @text, plus one extra, to be filled in
+ * @log_attrs: (array length=attrs_len): array with one #PangoLogAttr
+ *   per character in @text, plus one extra, to be filled in
  * @attrs_len: length of @log_attrs array
  *
  * Computes a #PangoLogAttr for each character in @text. The @log_attrs
@@ -1867,8 +1870,8 @@ pango_get_log_attrs (const char    *text,
   const char *range_start, *range_end;
   PangoScript script;
   PangoEngineLang *range_engine;
-  static guint engine_type_id = 0;
-  static guint render_type_id = 0;
+  static guint engine_type_id = 0; /* MT-safe */
+  static guint render_type_id = 0; /* MT-safe */
   PangoAnalysis analysis = { NULL };
   PangoScriptIter iter;
 
@@ -1880,10 +1883,9 @@ pango_get_log_attrs (const char    *text,
   pango_default_break (text, length, &analysis, log_attrs, attrs_len);
 
   if (engine_type_id == 0)
-    {
-      engine_type_id = g_quark_from_static_string (PANGO_ENGINE_TYPE_LANG);
-      render_type_id = g_quark_from_static_string (PANGO_RENDER_TYPE_NONE);
-    }
+    engine_type_id = g_quark_from_static_string (PANGO_ENGINE_TYPE_LANG);
+  if (render_type_id == 0)
+    render_type_id = g_quark_from_static_string (PANGO_RENDER_TYPE_NONE);
 
   lang_map = pango_find_map (language, engine_type_id, render_type_id);
 
